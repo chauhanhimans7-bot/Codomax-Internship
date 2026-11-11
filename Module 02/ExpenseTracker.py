@@ -60,7 +60,7 @@ while True:
 
 
 '''
-OUTPUT
+Test Result 
 PS C:\Users\Yuri\Desktop\codomax\Module 02> python ExpenseTracker.py
 
 ===== EXPENSE TRACKER =====
