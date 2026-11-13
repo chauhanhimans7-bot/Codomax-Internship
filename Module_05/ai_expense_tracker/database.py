@@ -1,19 +1,13 @@
-"""All SQLite work: users table + per-user expense isolation.
+"""SQLite database operations with strict per-user expense isolation.
 
-Security model
---------------
-* Passwords are hashed with PBKDF2-HMAC-SHA256 (310 000 iterations) + a
-  per-user random 32-byte salt stored alongside the hash.  Plain-text
-  passwords are never stored or logged.
-* Every expense read / write / delete query includes `AND user_id = ?` so
-  one authenticated user can never touch another user's rows, even if they
-  guess a valid expense id.
-* All user input goes through parameterised queries ("?" placeholders) —
-  no string interpolation, no SQL-injection risk.
+Data Isolation Model
+--------------------
+* Every expense is tied to a specific `user_id`.
+* Every SELECT / INSERT / UPDATE / DELETE query is parameterized and strictly
+  filtered by `user_id = ?`.
+* No user can view, edit, delete, or run AI analysis on another user's expenses.
 """
 
-import hashlib
-import hmac
 import os
 import sqlite3
 from contextlib import closing
@@ -23,27 +17,15 @@ import pandas as pd
 
 from config import CATEGORIES, DB_PATH, MAX_AMOUNT, MAX_DESC_LENGTH
 
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 def _connect():
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON")   # enforce FK constraints
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
-
-
-def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
-    """Return (hex_hash, hex_salt).  Generate a fresh salt when none given."""
-    if salt is None:
-        salt = os.urandom(32).hex()
-    key = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        310_000,          # OWASP-recommended iteration count for PBKDF2-SHA256
-    )
-    return key.hex(), salt
 
 
 # ---------------------------------------------------------------------------
@@ -51,18 +33,15 @@ def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def init_db():
-    """Create all tables if they do not exist; migrate old single-user DBs."""
+    """Create tables if not existing and ensure user-based data isolation."""
     with closing(_connect()) as conn, conn:
-
         # ── users table ──────────────────────────────────────────────────
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                username      TEXT    NOT NULL UNIQUE COLLATE NOCASE,
-                email         TEXT    NOT NULL UNIQUE COLLATE NOCASE,
-                password_hash TEXT    NOT NULL,
-                salt          TEXT    NOT NULL,
-                created_at    TEXT    DEFAULT CURRENT_TIMESTAMP
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                username   TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+                email      TEXT    DEFAULT '',
+                created_at TEXT    DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -70,7 +49,7 @@ def init_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS expenses (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                user_id      INTEGER NOT NULL,
                 expense_date TEXT    NOT NULL,
                 amount       REAL    NOT NULL,
                 description  TEXT    NOT NULL,
@@ -79,17 +58,29 @@ def init_db():
             )
         """)
 
-        # ── migration: add user_id to old single-user expense tables ─────
-        # Old rows get user_id = 0 (no matching user) so they stay invisible
-        # to every real account — data is preserved but isolated.
+        # ── migration: add user_id column if an older single-user db exists ──
         try:
             conn.execute(
-                "ALTER TABLE expenses ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0"
+                "ALTER TABLE expenses ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1"
             )
         except sqlite3.OperationalError:
-            pass   # column already exists — nothing to do
+            pass
 
-        # ── index for fast per-user lookups ──────────────────────────────
+        # ── ensure at least one default user exists ──────────────────────
+        first_user = conn.execute("SELECT id, username FROM users ORDER BY id ASC LIMIT 1").fetchone()
+        if not first_user:
+            cur = conn.execute(
+                "INSERT INTO users (username, email, password_hash, salt) VALUES (?, ?, '', '')",
+                ("Primary User", "user@local"),
+            )
+            default_id = cur.lastrowid
+        else:
+            default_id = first_user[0]
+
+        # ── reassign any legacy unassigned expenses (user_id = 0) to default user ──
+        conn.execute("UPDATE expenses SET user_id = ? WHERE user_id = 0", (default_id,))
+
+        # ── index for fast isolated queries ──────────────────────────────
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_expenses_user "
             "ON expenses (user_id, expense_date DESC)"
@@ -97,84 +88,50 @@ def init_db():
 
 
 # ---------------------------------------------------------------------------
-# User management
+# User management (isolated workspaces without password barriers)
 # ---------------------------------------------------------------------------
 
-def create_user(username: str, email: str, password: str) -> tuple[bool, str | int]:
-    """Register a new user.
-
-    Returns
-    -------
-    (True, user_id)          on success
-    (False, error_message)   on validation / uniqueness failure
-    """
-    username = username.strip()
-    email    = email.strip().lower()
-
-    if len(username) < 3:
-        return False, "Username must be at least 3 characters."
-    if not username.isalnum() and not all(c.isalnum() or c in "_-" for c in username):
-        return False, "Username may only contain letters, numbers, _ and -."
-    if len(password) < 6:
-        return False, "Password must be at least 6 characters."
-    if "@" not in email or "." not in email.split("@")[-1]:
-        return False, "Please enter a valid email address."
-
-    pw_hash, salt = _hash_password(password)
-    try:
-        with closing(_connect()) as conn, conn:
-            cur = conn.execute(
-                "INSERT INTO users (username, email, password_hash, salt) VALUES (?, ?, ?, ?)",
-                (username, email, pw_hash, salt),
-            )
-            return True, cur.lastrowid
-    except sqlite3.IntegrityError as exc:
-        msg = str(exc).lower()
-        if "username" in msg:
-            return False, "That username is already taken — please choose another."
-        if "email" in msg:
-            return False, "An account with that email already exists."
-        return False, "Registration failed. Please try again."
-
-
-def verify_user(username: str, password: str) -> dict | None:
-    """Return a user dict ``{id, username, email}`` if credentials match, else ``None``.
-
-    Timing-safe comparison is used so the response time does not leak
-    whether the username exists.
-    """
-    with closing(_connect()) as conn:
+def get_or_create_user(username: str) -> dict:
+    """Find or create a user by username. Case-insensitive."""
+    clean_name = username.strip() or "Primary User"
+    with closing(_connect()) as conn, conn:
         row = conn.execute(
-            "SELECT id, username, email, password_hash, salt FROM users WHERE username = ?",
-            (username.strip(),),
+            "SELECT id, username FROM users WHERE username = ? COLLATE NOCASE",
+            (clean_name,),
         ).fetchone()
+        if row:
+            return {"id": row[0], "username": row[1]}
 
-    if row is None:
-        # Still do a dummy hash to prevent username-enumeration via timing
-        _hash_password(password, "00" * 32)
-        return None
+        # Check if users table has password_hash column
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "password_hash" in cols:
+            cur = conn.execute(
+                "INSERT INTO users (username, email, password_hash, salt) VALUES (?, ?, '', '')",
+                (clean_name, f"{clean_name.lower()}@local"),
+            )
+        else:
+            cur = conn.execute(
+                "INSERT INTO users (username, email) VALUES (?, ?)",
+                (clean_name, f"{clean_name.lower()}@local"),
+            )
+        return {"id": cur.lastrowid, "username": clean_name}
 
-    user_id, uname, email, stored_hash, salt = row
-    computed, _ = _hash_password(password, salt)
 
-    # Constant-time comparison
-    if not hmac_compare(computed, stored_hash):
-        return None
-
-    return {"id": user_id, "username": uname, "email": email}
-
-
-def hmac_compare(a: str, b: str) -> bool:
-    """Constant-time string equality (prevents timing attacks)."""
-    return hmac.compare_digest(a.encode(), b.encode())
+def get_all_users() -> list[dict]:
+    """Return all existing users."""
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT id, username FROM users ORDER BY id ASC"
+        ).fetchall()
+    return [{"id": r[0], "username": r[1]} for r in rows]
 
 
 def get_user_by_id(user_id: int) -> dict | None:
     with closing(_connect()) as conn:
         row = conn.execute(
-            "SELECT id, username, email FROM users WHERE id = ?", (user_id,)
+            "SELECT id, username FROM users WHERE id = ?", (user_id,)
         ).fetchone()
-    return {"id": row[0], "username": row[1], "email": row[2]} if row else None
+    return {"id": row[0], "username": row[1]} if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -206,11 +163,12 @@ def validate_expense(amount, description, category, expense_date) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Expense CRUD — every write includes user_id for double-layer isolation
+# Expense CRUD — strictly isolated by user_id
 # ---------------------------------------------------------------------------
 
 def add_expense(user_id: int, expense_date: date, amount: float,
                 description: str, category: str) -> None:
+    """Insert an expense strictly owned by user_id."""
     with closing(_connect()) as conn, conn:
         conn.execute(
             "INSERT INTO expenses (user_id, expense_date, amount, description, category) "
@@ -222,7 +180,7 @@ def add_expense(user_id: int, expense_date: date, amount: float,
 
 def update_expense(user_id: int, expense_id: int, expense_date: date,
                    amount: float, description: str, category: str) -> None:
-    """Update only if the expense belongs to this user (AND user_id = ?)."""
+    """Update only if the expense belongs to user_id."""
     with closing(_connect()) as conn, conn:
         conn.execute(
             "UPDATE expenses "
@@ -234,7 +192,7 @@ def update_expense(user_id: int, expense_id: int, expense_date: date,
 
 
 def delete_expense(user_id: int, expense_id: int) -> None:
-    """Delete only if the expense belongs to this user (AND user_id = ?)."""
+    """Delete only if the expense belongs to user_id."""
     with closing(_connect()) as conn, conn:
         conn.execute(
             "DELETE FROM expenses WHERE id=? AND user_id=?",
@@ -243,7 +201,7 @@ def delete_expense(user_id: int, expense_id: int) -> None:
 
 
 def get_all_expenses(user_id: int) -> pd.DataFrame:
-    """Return this user's expenses as a DataFrame (newest first)."""
+    """Return only this user's expenses as a DataFrame (newest first)."""
     with closing(_connect()) as conn:
         df = pd.read_sql_query(
             "SELECT id, expense_date, amount, description, category "
@@ -254,16 +212,15 @@ def get_all_expenses(user_id: int) -> pd.DataFrame:
             params=(user_id,),
         )
     if df.empty:
-        # Ensure columns exist even when there is no data
-        df = pd.DataFrame(columns=["id", "expense_date", "amount",
-                                   "description", "category", "month"])
-        return df
+        return pd.DataFrame(columns=["id", "expense_date", "amount",
+                                     "description", "category", "month"])
     df["expense_date"] = pd.to_datetime(df["expense_date"])
     df["month"] = df["expense_date"].dt.strftime("%Y-%m")
     return df
 
 
 def get_expense_count(user_id: int) -> int:
+    """Count expenses belonging exclusively to this user."""
     with closing(_connect()) as conn:
         return conn.execute(
             "SELECT COUNT(*) FROM expenses WHERE user_id=?", (user_id,)

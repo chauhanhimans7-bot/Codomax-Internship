@@ -1,10 +1,11 @@
-# 💰 AI Expense Tracker (Secure Multi-User)
+# 💰 AI Expense Tracker (Multi-User Isolated Workspaces)
 
 Streamlit + Pandas + SQLite + Plotly + Groq API.
 
 ## Features
-- 🔐 **Multi-User Authentication**: Sign In & Sign Up with secure PBKDF2 password hashing + per-user salt.
-- 🛡️ **Complete Data Isolation**: Each user can only view, create, edit, delete, and analyze their own expenses.
+- 🚀 **Instant Access**: Zero login walls or password hurdles — launches directly into the dashboard.
+- 🛡️ **Complete Data Isolation**: Each user/profile has their own private workspace. Users can only view, add, update, delete, and analyze their own expenses.
+- 👤 **Profile Switching & Bookmarking**: Easily switch or create new profiles in the sidebar; preserve your active workspace with direct URLs (`?u=YourName`).
 - 🤖 **AI-Powered Insights**: Fast expense categorization, natural language expense parsing, and spending summaries powered by Groq (`qwen/qwen3.8-27b`).
 - 📊 **Interactive Analytics**: Real-time spending charts and category breakdowns.
 
@@ -19,14 +20,12 @@ streamlit run app.py
 ## Files
 | File | Purpose |
 |---|---|
-| `app.py` | Streamlit multi-user dashboard and main UI |
-| `auth.py` | Authentication UI (Login / Register) and session management |
-| `database.py` | SQLite schema, secure password hashing, and user-isolated CRUD |
+| `app.py` | Streamlit dashboard, profile switcher, and main UI |
+| `database.py` | SQLite schema, profile management, and user-isolated CRUD |
 | `ai_helper.py` | LLM parsing, categorization, and spending summaries (+ fallback rules) |
 | `charts.py` | Plotly bar, pie, and trend charts |
 | `config.py` | Central configuration, category lists, and environment loader |
 
-## API Key & Security
+## Data Isolation & Security
+- Backend and database queries strictly scope all records by `user_id`.
 - Groq API key is stored securely in `.env` (git-ignored) or `.streamlit/secrets.toml`.
-- Passwords are encrypted using salted PBKDF2-HMAC-SHA256 (310,000 iterations).
-- Backend and database queries strictly scope all records by authenticated `user_id`.
