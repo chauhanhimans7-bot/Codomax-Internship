@@ -47,7 +47,7 @@
 ## 📸 Screenshots
 
 ### Dashboard
-![Dashboard](assets/dashboard.jpg)
+![Dashboard](readme_with_assets/readme_pkg/assets/dashboard.jpg)
 
 ### Natural-language entry
 ![Add expense](assets/add-expense.jpg)
