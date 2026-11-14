@@ -47,7 +47,7 @@
 ## 📸 Screenshots
 
 ### Dashboard
-![Dashboard](readme_with_assets/readme_pkg/assets/dashboard.jpg)
+![Dashboard](assets/dashboard.jpg)
 
 ### Natural-language entry
 ![Add expense](assets/add-expense.jpg)
@@ -184,8 +184,8 @@ GROQ_API_KEY=your-groq-api-key-here
 
 ## 👤 Author
 
-**Dev Chauhan**
-BCA Student · Aspiring AI/ML Engineer
+**Dev**
+BCA Student · AI/ML Engineer
 
 [![GitHub](https://img.shields.io/badge/GitHub-chauhanhimans7--bot-181717?logo=github)](https://github.com/chauhanhimans7-bot)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-dev--chauhan06-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/dev-chauhan06)
